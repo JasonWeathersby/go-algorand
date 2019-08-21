@@ -46,16 +46,9 @@ func (keyreg KeyregTxnFields) apply(header Header, balances Balances, spec Speci
 		return err
 	}
 
-	if !balances.ConsensusParams().ExplicitEphemeralParams {
-		if keyreg.VoteFirst != 0 {
-			return fmt.Errorf("keyreg VoteFirst=%d not allowed", keyreg.VoteFirst)
-		}
-		if keyreg.VoteLast != 0 {
-			return fmt.Errorf("keyreg VoteLast=%d not allowed", keyreg.VoteLast)
-		}
-		if keyreg.VoteKeyDilution != 0 {
-			return fmt.Errorf("keyreg VoteKeyDilution=%d not allowed", keyreg.VoteKeyDilution)
-		}
+	// non-participatory accounts cannot be brought online (or offline)
+	if record.Status == basics.NotParticipating {
+		return fmt.Errorf("cannot change online/offline status of non-participating account %v", header.Sender)
 	}
 
 	// Update the registered keys and mark account as online (or, if the voting or selection keys are zero, offline)

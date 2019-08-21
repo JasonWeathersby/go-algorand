@@ -37,14 +37,6 @@ type PaymentTxnFields struct {
 	CloseRemainderTo basics.Address `codec:"close"`
 }
 
-func (payment PaymentTxnFields) senderDeductions() (amount basics.MicroAlgos, empty bool) {
-	amount = payment.Amount
-	if payment.CloseRemainderTo != (basics.Address{}) {
-		empty = true
-	}
-	return
-}
-
 func (payment PaymentTxnFields) checkSpender(header Header, spec SpecialAddresses, proto config.ConsensusParams) error {
 	if header.Sender == payment.CloseRemainderTo {
 		return fmt.Errorf("transaction cannot close account to its sender %v", header.Sender)
@@ -79,33 +71,29 @@ func (payment PaymentTxnFields) apply(header Header, balances Balances, spec Spe
 	}
 
 	if payment.CloseRemainderTo != (basics.Address{}) {
-		if balances.ConsensusParams().SupportTransactionClose {
-			rec, err := balances.Get(header.Sender)
-			if err != nil {
-				return err
-			}
+		rec, err := balances.Get(header.Sender)
+		if err != nil {
+			return err
+		}
 
-			closeAmount := rec.AccountData.MicroAlgos
-			ad.ClosingAmount = closeAmount
-			err = balances.Move(header.Sender, payment.CloseRemainderTo, closeAmount, &ad.SenderRewards, &ad.CloseRewards)
-			if err != nil {
-				return err
-			}
+		closeAmount := rec.AccountData.MicroAlgos
+		ad.ClosingAmount = closeAmount
+		err = balances.Move(header.Sender, payment.CloseRemainderTo, closeAmount, &ad.SenderRewards, &ad.CloseRewards)
+		if err != nil {
+			return err
+		}
 
-			// Confirm that we have no balance left
-			rec, err = balances.Get(header.Sender)
-			if !rec.AccountData.MicroAlgos.IsZero() {
-				return fmt.Errorf("balance %d still not zero after CloseRemainderTo", rec.AccountData.MicroAlgos.Raw)
-			}
+		// Confirm that we have no balance left
+		rec, err = balances.Get(header.Sender)
+		if !rec.AccountData.MicroAlgos.IsZero() {
+			return fmt.Errorf("balance %d still not zero after CloseRemainderTo", rec.AccountData.MicroAlgos.Raw)
+		}
 
-			// Clear out entire account record, to allow the DB to GC it
-			rec.AccountData = basics.AccountData{}
-			err = balances.Put(rec)
-			if err != nil {
-				return err
-			}
-		} else {
-			return fmt.Errorf("CloseRemainderTo not supported")
+		// Clear out entire account record, to allow the DB to GC it
+		rec.AccountData = basics.AccountData{}
+		err = balances.Put(rec)
+		if err != nil {
+			return err
 		}
 	}
 

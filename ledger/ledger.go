@@ -228,9 +228,7 @@ func (l *Ledger) Lookup(rnd basics.Round, addr basics.Address) (basics.AccountDa
 	l.trackerMu.RLock()
 	defer l.trackerMu.RUnlock()
 
-	// As a precaution against callers that forget to apply rewards
-	// and look at data.MicroAlgos directly, this function applies rewards
-	// up to rnd.
+	// Intentionally apply (pending) rewards up to rnd.
 	data, err := l.accts.lookup(rnd, addr, true)
 	if err != nil {
 		return basics.AccountData{}, err
@@ -251,14 +249,6 @@ func (l *Ledger) LookupWithoutRewards(rnd basics.Round, addr basics.Address) (ba
 	}
 
 	return data, nil
-}
-
-// lookup returns the raw accountData as stored by the ledger, without applying rewards
-func (l *Ledger) lookupWithoutRewards(rnd basics.Round, addr basics.Address) (basics.AccountData, error) {
-	l.trackerMu.RLock()
-	defer l.trackerMu.RUnlock()
-
-	return l.accts.lookup(rnd, addr, false)
 }
 
 // Totals returns the totals of all accounts at the end of round rnd.
@@ -316,6 +306,11 @@ func (l *Ledger) BlockHdr(rnd basics.Round) (blk bookkeeping.BlockHeader, err er
 		l.headerCache.Put(rnd, blk)
 	}
 	return
+}
+
+// EncodedBlockCert returns the encoded block and the corresponding encodded certificate of the block for round rnd.
+func (l *Ledger) EncodedBlockCert(rnd basics.Round) (blk []byte, cert []byte, err error) {
+	return l.blockQ.getEncodedBlockCert(rnd)
 }
 
 // BlockCert returns the block and the certificate of the block for round rnd.

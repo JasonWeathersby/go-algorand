@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/algorand/go-algorand/config"
+	"github.com/algorand/go-algorand/crypto"
 	"github.com/algorand/go-algorand/daemon/algod/api/client"
 	"github.com/algorand/go-algorand/logging"
 	"github.com/algorand/go-algorand/logging/telemetryspec"
@@ -278,17 +279,14 @@ func initTelemetry(genesisID string, log logging.Logger, dataDirectory string) {
 	// If ALGOTEST env variable is set, telemetry is disabled - allows disabling telemetry for tests
 	isTest := os.Getenv("ALGOTEST") != ""
 	if !isTest {
-		telemetryConfig, err := logging.EnsureTelemetryConfig(nil, genesisID)
+		telemetryConfig, err := logging.EnsureTelemetryConfig(&dataDirectory, genesisID)
 		if err != nil {
 			fmt.Fprintln(os.Stdout, "error loading telemetry config", err)
 			return
 		}
 
 		// Apply telemetry override.
-		hasOverride, override := logging.TelemetryOverride(*telemetryOverride)
-		if hasOverride {
-			telemetryConfig.Enable = override
-		}
+		telemetryConfig.Enable = logging.TelemetryOverride(*telemetryOverride)
 
 		if telemetryConfig.Enable {
 			err = log.EnableTelemetry(telemetryConfig)
@@ -305,11 +303,11 @@ func initTelemetry(genesisID string, log logging.Logger, dataDirectory string) {
 			if log.GetTelemetryEnabled() {
 				currentVersion := config.GetCurrentVersion()
 				startupDetails := telemetryspec.StartupEventDetails{
-					Version:    currentVersion.String(),
-					CommitHash: currentVersion.CommitHash,
-					Branch:     currentVersion.Branch,
-					Channel:    currentVersion.Channel,
-					Instance:   dataDirectory,
+					Version:      currentVersion.String(),
+					CommitHash:   currentVersion.CommitHash,
+					Branch:       currentVersion.Branch,
+					Channel:      currentVersion.Channel,
+					InstanceHash: crypto.Hash([]byte(dataDirectory)).String(),
 				}
 
 				log.EventWithDetails(telemetryspec.HostApplicationState, telemetryspec.StartupEvent, startupDetails)

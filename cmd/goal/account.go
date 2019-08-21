@@ -56,6 +56,8 @@ var (
 	keyDilution        uint64
 	threshold          uint8
 	partKeyOutDir      string
+	partKeyFile        string
+	partKeyDeleteInput bool
 	importDefault      bool
 	mnemonic           string
 )
@@ -69,6 +71,7 @@ func init() {
 	accountCmd.AddCommand(rewardsCmd)
 	accountCmd.AddCommand(changeOnlineCmd)
 	accountCmd.AddCommand(addParticipationKeyCmd)
+	accountCmd.AddCommand(installParticipationKeyCmd)
 	accountCmd.AddCommand(listParticipationKeysCmd)
 	accountCmd.AddCommand(importCmd)
 	accountCmd.AddCommand(exportCmd)
@@ -94,20 +97,20 @@ func init() {
 	newCmd.Flags().BoolVarP(&defaultAccount, "default", "f", false, "Set this account as the default one")
 
 	// Delete account flag
-	deleteCmd.Flags().StringVarP(&accountAddress, "addr", "a", "", "Address of account to delete")
-	deleteCmd.MarkFlagRequired("addr")
+	deleteCmd.Flags().StringVarP(&accountAddress, "address", "a", "", "Address of account to delete")
+	deleteCmd.MarkFlagRequired("address")
 
 	// New Multisig account flag
 	newMultisigCmd.Flags().Uint8VarP(&threshold, "threshold", "T", 1, "Number of signatures required to spend from this address")
 	newMultisigCmd.MarkFlagRequired("threshold")
 
 	// Delete multisig account flag
-	deleteMultisigCmd.Flags().StringVarP(&accountAddress, "addr", "a", "", "Address of multisig account to delete")
-	deleteMultisigCmd.MarkFlagRequired("addr")
+	deleteMultisigCmd.Flags().StringVarP(&accountAddress, "address", "a", "", "Address of multisig account to delete")
+	deleteMultisigCmd.MarkFlagRequired("address")
 
 	// Lookup info for multisig account flag
-	infoMultisigCmd.Flags().StringVarP(&accountAddress, "addr", "a", "", "Address of multisig account to look up")
-	infoMultisigCmd.MarkFlagRequired("addr")
+	infoMultisigCmd.Flags().StringVarP(&accountAddress, "address", "a", "", "Address of multisig account to look up")
+	infoMultisigCmd.MarkFlagRequired("address")
 
 	// Balance flags
 	balanceCmd.Flags().StringVarP(&accountAddress, "address", "a", "", "Account address to retrieve balance (required)")
@@ -118,8 +121,8 @@ func init() {
 	rewardsCmd.MarkFlagRequired("address")
 
 	// changeOnlineStatus flags
-	changeOnlineCmd.Flags().StringVarP(&accountAddress, "address", "a", "", "Account address to change (required)")
-	changeOnlineCmd.MarkFlagRequired("address")
+	changeOnlineCmd.Flags().StringVarP(&accountAddress, "address", "a", "", "Account address to change (required if no -partkeyfile)")
+	changeOnlineCmd.Flags().StringVarP(&partKeyFile, "partkeyfile", "", "", "Participation key file (required if no -account)")
 	changeOnlineCmd.Flags().BoolVarP(&online, "online", "o", true, "Set this account to online or offline")
 	changeOnlineCmd.MarkFlagRequired("online")
 	changeOnlineCmd.Flags().Uint64VarP(&transactionFee, "fee", "f", 0, "The Fee to set on the status change transaction (defaults to suggested fee)")
@@ -137,6 +140,11 @@ func init() {
 	addParticipationKeyCmd.MarkFlagRequired("roundLastValid")
 	addParticipationKeyCmd.Flags().StringVarP(&partKeyOutDir, "outdir", "o", "", "Save participation key file to specified output directory to (for offline creation)")
 	addParticipationKeyCmd.Flags().Uint64VarP(&keyDilution, "keyDilution", "", 0, "Key dilution for two-level participation keys")
+
+	// installParticipationKey flags
+	installParticipationKeyCmd.Flags().StringVar(&partKeyFile, "partkey", "", "Participation key file to install")
+	installParticipationKeyCmd.MarkFlagRequired("partkey")
+	installParticipationKeyCmd.Flags().BoolVar(&partKeyDeleteInput, "delete-input", false, "Acknowledge that installpartkey will delete the input key file")
 
 	// import flags
 	importCmd.Flags().BoolVarP(&importDefault, "default", "f", false, "Set this account as the default one")
@@ -413,7 +421,7 @@ var listCmd = &cobra.Command{
 		// For each address, request information about it from algod
 		for _, addr := range addrs {
 			response, _ := client.AccountInformation(addr.Addr)
-			// it's okay to procede with out algod info
+			// it's okay to proceed without algod info
 
 			// Display this information to the user
 			if addr.Multisig {
@@ -468,14 +476,44 @@ var rewardsCmd = &cobra.Command{
 var changeOnlineCmd = &cobra.Command{
 	Use:   "changeonlinestatus",
 	Short: "Change online status for the specified account",
-	Long:  `Change online status for the specified account. Set online should be 1 to set online, 0 to set offline. The broadcast transaction will be valid for a limited number of rounds. goal will provide the TXID of the transaction if successful. Going online requires that the given account have a valid participation key.`,
+	Long:  `Change online status for the specified account. Set online should be 1 to set online, 0 to set offline. The broadcast transaction will be valid for a limited number of rounds. goal will provide the TXID of the transaction if successful. Going online requires that the given account has a valid participation key. If the participation key is specified using --partkeyfile, you must separately install the participation key from that file using "goal account installpartkey".`,
 	Args:  validateNoPosArgsFn,
 	Run: func(cmd *cobra.Command, args []string) {
+		if accountAddress == "" && partKeyFile == "" {
+			fmt.Printf("Must specify one of --address or --partkeyfile\n")
+			os.Exit(1)
+		}
+
+		if partKeyFile != "" && !online {
+			fmt.Printf("Going offline does not support --partkeyfile\n")
+			os.Exit(1)
+		}
+
 		// Pull the current round for use in our new transactions
 		dataDir := ensureSingleDataDir()
 		client := ensureFullClient(dataDir)
 
-		err := changeAccountOnlineStatus(accountAddress, nil, online, onlineTxFile, walletName, onlineFirstRound, onlineValidRounds, transactionFee, dataDir, client)
+		var part *algodAcct.Participation
+		if partKeyFile != "" {
+			partdb, err := db.MakeErasableAccessor(partKeyFile)
+			if err != nil {
+				fmt.Printf("Cannot open partkey %s: %v\n", partKeyFile, err)
+				os.Exit(1)
+			}
+
+			partkey, err := algodAcct.RestoreParticipation(partdb)
+			if err != nil {
+				fmt.Printf("Cannot load partkey %s: %v\n", partKeyFile, err)
+				os.Exit(1)
+			}
+
+			part = &partkey
+			if accountAddress == "" {
+				accountAddress = part.Parent.String()
+			}
+		}
+
+		err := changeAccountOnlineStatus(accountAddress, part, online, onlineTxFile, walletName, onlineFirstRound, onlineValidRounds, transactionFee, dataDir, client)
 		if err != nil {
 			reportErrorf(err.Error())
 		}
@@ -495,65 +533,24 @@ func changeAccountOnlineStatus(acct string, part *algodAcct.Participation, goOnl
 		return err
 	}
 
-	if txFile == "" {
-		// Sign & broadcast the transaction
-		wh, pw := ensureWalletHandleMaybePassword(dataDir, wallet, true)
-		txid, err := client.SignAndBroadcastTransaction(wh, pw, utx)
-		if err != nil {
-			return fmt.Errorf(errorOnlineTX, err)
-		}
-		fmt.Printf("Transaction id for status change transaction: %s\n", txid)
-
-		if noWaitAfterSend {
-			fmt.Println("Note: status will not change until transaction is finalized")
-			return nil
-		}
-
-		// Get current round information
-		stat, err := client.Status()
-		if err != nil {
-			return fmt.Errorf(errorRequestFail, err)
-		}
-
-		for {
-			// Check if we know about the transaction yet
-			txn, err := client.PendingTransactionInformation(txid)
-			if err != nil {
-				return fmt.Errorf(errorRequestFail, err)
-			}
-
-			if txn.ConfirmedRound > 0 {
-				reportInfof(infoTxCommitted, txid, txn.ConfirmedRound)
-				break
-			}
-
-			if txn.PoolError != "" {
-				return fmt.Errorf(txPoolError, txid, txn.PoolError)
-			}
-
-			reportInfof(infoTxPending, txid, stat.LastRound)
-			stat, err = client.WaitForRound(stat.LastRound + 1)
-			if err != nil {
-				return fmt.Errorf(errorRequestFail, err)
-			}
-		}
-	} else {
-		// Wrap in a transactions.SignedTxn with an empty sig.
-		// This way protocol.Encode will encode the transaction type
-		stxn, err := transactions.AssembleSignedTxn(utx, crypto.Signature{}, crypto.MultisigSig{})
-		if err != nil {
-			return fmt.Errorf(errorConstructingTX, err)
-		}
-
-		stxn = populateBlankMultisig(client, dataDir, wallet, stxn)
-
-		// Write the SignedTxn to the output file
-		err = ioutil.WriteFile(txFile, protocol.Encode(stxn), 0600)
-		if err != nil {
-			return fmt.Errorf(fileWriteError, txFile, err)
-		}
+	if txFile != "" {
+		return writeTxnToFile(client, false, dataDir, wallet, utx, txFile)
 	}
-	return nil
+
+	// Sign & broadcast the transaction
+	wh, pw := ensureWalletHandleMaybePassword(dataDir, wallet, true)
+	txid, err := client.SignAndBroadcastTransaction(wh, pw, utx)
+	if err != nil {
+		return fmt.Errorf(errorOnlineTX, err)
+	}
+	fmt.Printf("Transaction id for status change transaction: %s\n", txid)
+
+	if noWaitAfterSend {
+		fmt.Println("Note: status will not change until transaction is finalized")
+		return nil
+	}
+
+	return waitForCommit(client, txid)
 }
 
 var addParticipationKeyCmd = &cobra.Command{
@@ -576,6 +573,37 @@ var addParticipationKeyCmd = &cobra.Command{
 			reportErrorf(errorRequestFail, err)
 		}
 		fmt.Println("Participation key generation successful")
+	},
+}
+
+var installParticipationKeyCmd = &cobra.Command{
+	Use:   "installpartkey",
+	Short: "Install a participation key",
+	Long:  `Install a participation key from a partkey file. Intended for use with participation key files generated by "algokey part generate". Does not change the online status of an account or register the participation key; use "goal account changeonlinestatus" for doing so. Deletes input key file on successful install to ensure forward security.`,
+	Args:  validateNoPosArgsFn,
+	Run: func(cmd *cobra.Command, args []string) {
+		if !partKeyDeleteInput {
+			fmt.Println(
+				`The installpartkey command deletes the input participation file on
+successful installation.  Please acknowledge this by passing the
+"--delete-input" flag to the installpartkey command.  You can make
+a copy of the input file if needed, but please keep in mind that
+participation keys must be securely deleted for each round, to ensure
+forward security.  Storing old participation keys compromises overall
+system security.
+
+No --delete-input flag specified, exiting without installing key.`)
+			os.Exit(1)
+		}
+
+		dataDir := ensureSingleDataDir()
+
+		client := ensureAlgodClient(dataDir)
+		_, _, err := client.InstallParticipationKeys(partKeyFile)
+		if err != nil {
+			reportErrorf(errorRequestFail, err)
+		}
+		fmt.Println("Participation key installed successfully")
 	},
 }
 
@@ -610,7 +638,7 @@ var renewParticipationKeyCmd = &cobra.Command{
 			reportErrorf(errorRequestFail, err)
 		}
 		for _, part := range parts {
-			if part.Address().GetChecksumAddress().String() == accountAddress {
+			if part.Address().String() == accountAddress {
 				if part.LastValid >= basics.Round(roundLastValid) {
 					reportErrorf(errExistingPartKey, roundLastValid, part.LastValid)
 				}
@@ -702,17 +730,17 @@ func renewPartKeysInDir(dataDir string, lastValidRound uint64, fee uint64, dilut
 	// Make sure we don't already have a partkey valid for (or after) specified roundLastValid
 	for _, renewPart := range renewAccounts {
 		if renewPart.LastValid >= basics.Round(lastValidRound) {
-			fmt.Printf("  Skipping account %s: Already has a part key valid beyond %d (currently %d)\n", renewPart.Address().GetChecksumAddress(), lastValidRound, renewPart.LastValid)
+			fmt.Printf("  Skipping account %s: Already has a part key valid beyond %d (currently %d)\n", renewPart.Address(), lastValidRound, renewPart.LastValid)
 			continue
 		}
 
 		// If the account's latest partkey expired before the current round, don't automatically renew and instead instruct the user to explicitly renew it.
 		if renewPart.LastValid < basics.Round(lastValidRound) {
-			fmt.Printf("  Skipping account %s: This account has part keys that have expired.  Please renew this account explicitly using 'renewpartkey'\n", renewPart.Address().GetChecksumAddress())
+			fmt.Printf("  Skipping account %s: This account has part keys that have expired.  Please renew this account explicitly using 'renewpartkey'\n", renewPart.Address())
 			continue
 		}
 
-		address := renewPart.Address().GetChecksumAddress().String()
+		address := renewPart.Address().String()
 		err = generateAndRegisterPartKey(address, currentRound, lastValidRound, proto.MaxTxnLife, fee, dilution, wallet, dataDir, client)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "  Error renewing part key for account %s: %v\n", address, err)
@@ -744,11 +772,27 @@ var listParticipationKeysCmd = &cobra.Command{
 		}
 		sort.Strings(filenames)
 
-		rowFormat := "%-80s\t%-60s\t%12s\t%12s\t%12s\n"
-		fmt.Printf(rowFormat, "Filename", "Parent address", "First round", "Last round", "First key")
+		rowFormat := "%-10s\t%-80s\t%-60s\t%12s\t%12s\t%12s\n"
+		fmt.Printf(rowFormat, "Registered", "Filename", "Parent address", "First round", "Last round", "First key")
 		for _, fn := range filenames {
+			onlineInfoStr := "unknown"
+			onlineAccountInfo, err := client.AccountInformation(parts[fn].Address().GetUserAddress())
+			if err == nil {
+				votingBytes := parts[fn].Voting.OneTimeSignatureVerifier
+				vrfBytes := parts[fn].VRF.PK
+				if string(onlineAccountInfo.Participation.ParticipationPK) == string(votingBytes[:]) &&
+					(string(onlineAccountInfo.Participation.VRFPK) == string(vrfBytes[:])) &&
+					(onlineAccountInfo.Participation.VoteFirst == uint64(parts[fn].FirstValid)) &&
+					(onlineAccountInfo.Participation.VoteLast == uint64(parts[fn].LastValid)) &&
+					(onlineAccountInfo.Participation.VoteKeyDilution == parts[fn].KeyDilution) {
+					onlineInfoStr = "yes"
+				} else {
+					onlineInfoStr = "no"
+				}
+			}
+			// it's okay to proceed without algod info
 			first, last := parts[fn].ValidInterval()
-			fmt.Printf(rowFormat, fn, parts[fn].Address().GetUserAddress(),
+			fmt.Printf(rowFormat, onlineInfoStr, fn, parts[fn].Address().GetUserAddress(),
 				fmt.Sprintf("%d", first),
 				fmt.Sprintf("%d", last),
 				fmt.Sprintf("%d.%d", parts[fn].Voting.FirstBatch, parts[fn].Voting.FirstOffset))
@@ -963,7 +1007,7 @@ var partkeyInfoCmd = &cobra.Command{
 			for filename, part := range parts {
 				fmt.Println("------------------------------------------------------------------")
 				info := partkeyInfo{
-					Address:         part.Address().GetChecksumAddress().String(),
+					Address:         part.Address().String(),
 					FirstValid:      part.FirstValid,
 					LastValid:       part.LastValid,
 					VoteID:          part.VotingSecrets().OneTimeSignatureVerifier,

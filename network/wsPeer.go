@@ -65,6 +65,7 @@ type wsPeerWebsocketConn interface {
 	RemoteAddr() net.Addr
 	NextReader() (int, io.Reader, error)
 	WriteMessage(int, []byte) error
+	WriteControl(int, []byte, time.Time) error
 	SetReadLimit(int64)
 	CloseWithoutFlush() error
 }
@@ -144,6 +145,9 @@ type wsPeer struct {
 
 	prioAddress basics.Address
 	prioWeight  uint64
+
+	// createTime is the time at which the connection was established with the peer.
+	createTime time.Time
 }
 
 // HTTPPeer is what the opaque Peer might be.
@@ -258,6 +262,15 @@ func (wp *wsPeer) readLoop() {
 		msg := IncomingMessage{}
 		mtype, reader, err := wp.conn.NextReader()
 		if err != nil {
+			if ce, ok := err.(*websocket.CloseError); ok {
+				switch ce.Code {
+				case websocket.CloseNormalClosure, websocket.CloseGoingAway:
+					// deliberate close, no error
+					return
+				default:
+					// fall through to reportReadErr
+				}
+			}
 			wp.reportReadErr(err)
 			return
 		}
@@ -476,6 +489,7 @@ func (wp *wsPeer) Close() {
 	atomic.StoreInt32(&wp.didSignalClose, 1)
 	if atomic.CompareAndSwapInt32(&wp.didInnerClose, 0, 1) {
 		close(wp.closing)
+		wp.conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""), time.Now().Add(5*time.Second))
 		wp.conn.CloseWithoutFlush()
 	}
 }
